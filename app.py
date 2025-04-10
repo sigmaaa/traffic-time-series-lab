@@ -3,10 +3,12 @@ import pandas as pd
 import plotly.graph_objs as go
 from skimage.restoration import denoise_wavelet
 from pyts.decomposition import SingularSpectrumAnalysis
+import numpy as np
 
 # Load data
 df = pd.read_csv("train_ML_IOT.csv", parse_dates=["DateTime"])
 df = df[df["Junction"] == 1]
+
 signal = df["Vehicles"].astype(float).values
 time = df["DateTime"]
 
@@ -19,6 +21,21 @@ mode_options = ['soft', 'hard']
 # App setup
 external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
 app = Dash(__name__, external_stylesheets=external_stylesheets)
+
+# Function to compute W-correlation matrix
+
+
+def w_correlation_matrix(components):
+    num_components = components.shape[1]
+    W = np.zeros((num_components, num_components))
+    for i in range(num_components):
+        for j in range(num_components):
+            num = np.dot(components[0, i], components[0, j])
+            den = np.sqrt(np.dot(
+                components[0, i], components[0, i]) * np.dot(components[0, j], components[0, j]))
+            W[i, j] = num / den if den != 0 else 0
+    return W
+
 
 # Layout
 app.layout = html.Div([
@@ -79,9 +96,10 @@ def render_content(tab):
                     style={'width': '300px'}
                 )
             ], style={'marginBottom': '20px'}),
-            dcc.Graph(id='wavelet-denoised-graph')
+            dcc.Graph(id='wavelet-denoised-graph'),
+            dcc.Graph(id='w-correlation-graph')
         ])
-    elif tab == 'ttab-2-lab-2':
+    elif tab == 'tab-2-lab-2':
         return html.Div([
             html.H3('Tab content 2'),
             dcc.Graph(
@@ -96,11 +114,12 @@ def render_content(tab):
             )
         ])
 
-# Denoising graph callback
+# Main callback
 
 
 @callback(
     Output('wavelet-denoised-graph', 'figure'),
+    Output('w-correlation-graph', 'figure'),
     Input('wavelet-selector', 'value'),
     Input('threshold_method-selector', 'value'),
     Input('mode-selector', 'value'),
@@ -122,6 +141,7 @@ def update_graph(wavelet, method, mode, window_size):
     trend_ssa = components[0][0]
     residual = signal - trend_ssa
 
+    # Main graph
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=time, y=signal,
                   mode='lines', name='Original Signal'))
@@ -140,7 +160,23 @@ def update_graph(wavelet, method, mode, window_size):
         yaxis_title="Vehicles",
         height=500
     )
-    return fig
+
+    # W-correlation matrix
+    W = w_correlation_matrix(components)
+    heatmap = go.Figure(data=go.Heatmap(
+        z=W,
+        x=[f"C{i+1}" for i in range(W.shape[0])],
+        y=[f"C{i+1}" for i in range(W.shape[0])],
+        colorscale='Viridis'
+    ))
+    heatmap.update_layout(
+        title="W-Correlation Map of SSA Components",
+        xaxis_title="Components",
+        yaxis_title="Components",
+        height=500
+    )
+
+    return fig, heatmap
 
 
 # Run app
