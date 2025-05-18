@@ -240,7 +240,7 @@ def update_tab2(tab, bar):
     window_size = 6
     ssa = SingularSpectrumAnalysis(window_size)
     components = ssa.fit_transform(signal.reshape(1, -1))
-    trend_ssa = components[0][1]
+    trend_ssa = components[0][0]
     denoised_signal = trend_ssa
 
     # Графічний апост метод
