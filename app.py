@@ -4,6 +4,7 @@ import plotly.graph_objs as go
 from skimage.restoration import denoise_wavelet
 from pyts.decomposition import SingularSpectrumAnalysis
 import numpy as np
+from scipy.stats import mannwhitneyu
 
 # Load data
 df = pd.read_csv("train_ML_IOT.csv", parse_dates=["DateTime"])
@@ -23,6 +24,52 @@ external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
 app = Dash(__name__, external_stylesheets=external_stylesheets)
 
 # Function to compute W-correlation matrix
+
+
+# --- Графічний метод: відстань від прямої ---
+def compute_distances(t, z_smooth, m, n):
+    tm, tn = t[m], t[n]
+    zm, zn = z_smooth[m], z_smooth[n]
+
+    # Параметри прямої: z(t) = kt + b
+    k = (zn - zm) / (tn - tm)
+    b = zm - k * tm
+
+    # Обчислюємо d_ti
+    d_ti = np.abs(k * t[m:n+1] - z_smooth[m:n+1] + b) / np.sqrt(k**2 + 1)
+    return d_ti, k, b
+
+# --- Рекурсивне виявлення змін + U-критерій --
+
+
+def find_change_point(t, z_smooth, m, n, bar, change_points):
+    if n - m < 25:  # мінімальна довжина сегмента
+        return
+
+    d_ti, k, b = compute_distances(t, z_smooth, m, n)
+    idx_local = np.argmax(d_ti)
+    global_idx = m + idx_local
+    d_max = d_ti[idx_local]
+
+    # U-критерій між лівим і правим сегментом
+    left = z_smooth[m:global_idx]
+    right = z_smooth[global_idx:n]
+
+    if len(left) < 10 or len(right) < 10:
+        return
+
+    u_stat, p_value = mannwhitneyu(left, right, alternative='two-sided')
+
+    if d_max > bar and p_value < 0.05:
+        change_points.append(global_idx)
+    find_change_point(t, z_smooth,  m, global_idx, bar, change_points)
+    find_change_point(t, z_smooth,  global_idx, n, bar, change_points)
+
+
+def detect_changes(t, z_smooth, bar=2.0):
+    change_points = []
+    find_change_point(t, z_smooth, 0, len(t) - 1, bar, change_points)
+    return change_points
 
 
 def w_correlation_matrix(components):
@@ -101,17 +148,19 @@ def render_content(tab):
         ])
     elif tab == 'tab-2-lab-2':
         return html.Div([
-            html.H3('Tab content 2'),
-            dcc.Graph(
-                id='graph-2-tabs-dcc',
-                figure={
-                    'data': [{
-                        'x': [1, 2, 3],
-                        'y': [5, 10, 6],
-                        'type': 'bar'
-                    }]
-                }
-            )
+            html.H3("Change Point Detection & Mann–Whitney U Test (denoised by SSA)"),
+            html.Label("Threshold (bar) for detecting disorder:"),
+            dcc.Slider(
+                id='bar-slider',
+                min=2,
+                max=150,
+                step=1,
+                value=60,
+                marks={i: str(i) for i in range(10, 151, 20)},
+                tooltip={"placement": "bottom", "always_visible": True},
+                updatemode='drag',
+            ),
+            dcc.Graph(id='residuals-graph'),
         ])
 
 # Main callback
@@ -138,7 +187,7 @@ def update_graph(wavelet, method, mode, window_size):
     ssa = SingularSpectrumAnalysis(window_size)
     components = ssa.fit_transform(signal.reshape(1, -1))
 
-    trend_ssa = components[0][0]
+    trend_ssa = np.sum(components[0][:3], axis=0)
     residual = signal - trend_ssa
 
     # Main graph
@@ -179,6 +228,63 @@ def update_graph(wavelet, method, mode, window_size):
     return fig, heatmap
 
 
+@callback(
+    Output('residuals-graph', 'figure'),
+    Input('tabs', 'value'),
+    Input('bar-slider', 'value')
+)
+def update_tab2(tab, bar):
+    if tab != 'tab-2-lab-2':
+        return go.Figure(), ""
+    # SSA з вікном 6
+    window_size = 6
+    ssa = SingularSpectrumAnalysis(window_size)
+    components = ssa.fit_transform(signal.reshape(1, -1))
+    trend_ssa = components[0][1]
+    denoised_signal = trend_ssa
+
+    # Графічний апост метод
+    numeric_time = np.arange(len(trend_ssa))
+    change_points_idxs = detect_changes(numeric_time, denoised_signal, bar)
+
+    # Точки часу, коли сталося розладнання
+    change_points_times = [time[i] for i in change_points_idxs]
+
+    # Побудова графіка
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(x=time, y=denoised_signal,
+                             mode='lines', name='Denoised signal'))
+
+    # Додаємо вертикальні лінії
+    for t in change_points_times:
+        fig.add_shape(
+            type='line',
+            x0=t,
+            x1=t,
+            y0=min(denoised_signal),
+            y1=max(denoised_signal),
+            line=dict(color='orange', width=2, dash='dash')
+        )
+
+    # Додаємо "примарну" лінію для легенди
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode='lines',
+        line=dict(color='orange', width=2, dash='dash'),
+        name='Change Points'
+    ))
+
+    fig.update_layout(
+        title="Outliners detection on Denoised Signal",
+        xaxis_title="Time",
+        yaxis_title="Vehicles",
+        height=500
+    )
+
+    return fig
+
+
 # Run app
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
