@@ -1,10 +1,13 @@
-from dash import Dash, dcc, html, Input, Output, callback
+from dash import Dash, dcc, html, Input, Output, State, callback
 import pandas as pd
 import plotly.graph_objs as go
 from skimage.restoration import denoise_wavelet
 from pyts.decomposition import SingularSpectrumAnalysis
 import numpy as np
 from scipy.stats import mannwhitneyu
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+
 
 # Load data
 df = pd.read_csv("train_ML_IOT.csv", parse_dates=["DateTime"])
@@ -22,6 +25,46 @@ mode_options = ['soft', 'hard']
 # App setup
 external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
 app = Dash(__name__, external_stylesheets=external_stylesheets)
+
+
+def preprocess_signal(df, junction=1):
+    df = df[df['Junction'] == junction].copy()
+    df['DateTime'] = pd.to_datetime(df['DateTime'])
+    df = df.sort_values('DateTime')
+    return df[['DateTime', 'Vehicles']].reset_index(drop=True)
+
+
+def quantize_signal(signal, n_states):
+    kmeans = KMeans(n_clusters=n_states, n_init=10, random_state=0)
+    states = kmeans.fit_predict(signal.reshape(-1, 1))
+    centers = kmeans.cluster_centers_.flatten()
+    return states, centers
+
+
+def build_transition_matrix(states, n_states):
+    trans_matrix = np.zeros((n_states, n_states))
+    for (i, j) in zip(states[:-1], states[1:]):
+        trans_matrix[i, j] += 1
+    trans_matrix = trans_matrix / trans_matrix.sum(axis=1, keepdims=True)
+    return np.nan_to_num(trans_matrix)
+
+
+def em_transition_model(states, n_states):
+    X = np.column_stack([states[:-1], states[1:]])
+    gmm = GaussianMixture(n_components=n_states,
+                          covariance_type='full', random_state=0)
+    gmm.fit(X)
+    return gmm
+
+
+def predict_markov_chain(current_state, trans_matrix, steps):
+    n_states = trans_matrix.shape[0]
+    probs = np.zeros((steps + 1, n_states))
+    probs[0, current_state] = 1.0
+    for t in range(1, steps + 1):
+        probs[t] = probs[t - 1] @ trans_matrix
+    return probs
+
 
 # Function to compute W-correlation matrix
 
@@ -93,6 +136,21 @@ app.layout = html.Div([
     dcc.Tabs(id="tabs", value='tab-1-lab-1', children=[
         dcc.Tab(label='Lab-1', value='tab-1-lab-1'),
         dcc.Tab(label='Lab-2', value='tab-2-lab-2'),
+        dcc.Tab(label="Lab-3: Markov Forecast", children=[
+            html.Div([
+                html.H4(
+                    "Короткочасний прогноз трафіку за допомогою ланцюгів Маркова"),
+                dcc.Slider(id='lab3-k-slider', min=2, max=10, step=1, value=4,
+                           marks={i: str(i) for i in range(2, 11)},
+                           tooltip={"placement": "bottom"}),
+                html.Label("Горизонт прогнозування (год):"),
+                dcc.Input(id='lab3-horizon', type='number',
+                          value=6, min=1, max=24),
+                html.Button("Прогнозувати",
+                            id='lab3-forecast-button', n_clicks=0),
+                dcc.Graph(id='lab3-prediction-graph')
+            ])
+        ]),
     ]),
     html.Div(id='tab-1-content'),
 ])
@@ -162,6 +220,7 @@ def render_content(tab):
             ),
             dcc.Graph(id='residuals-graph'),
         ])
+
 
 # Main callback
 
@@ -282,6 +341,44 @@ def update_tab2(tab, bar):
         height=500
     )
 
+    return fig
+
+
+@app.callback(
+    Output('lab3-prediction-graph', 'figure'),
+    Input('lab3-forecast-button', 'n_clicks'),
+    State('lab3-k-slider', 'value'),
+    State('lab3-horizon', 'value')
+)
+def update_lab3_forecast(n_clicks, k, horizon):
+    if n_clicks == 0:
+        return go.Figure()
+
+    df = pd.read_csv('train_ML_IOT.csv')
+    signal_df = preprocess_signal(df)
+    signal = signal_df['Vehicles'].values
+    states, centers = quantize_signal(signal, k)
+    transition_matrix = build_transition_matrix(states, k)
+
+    # Поточний стан — останній у сигналі
+    current_state = states[-1]
+
+    # Прогноз на horizon кроків
+    probs = predict_markov_chain(current_state, transition_matrix, horizon)
+
+    fig = go.Figure()
+    for s in range(k):
+        fig.add_trace(go.Scatter(
+            x=list(range(horizon + 1)),
+            y=probs[:, s],
+            mode='lines+markers',
+            name=f"Стан {s} (центр = {centers[s]:.1f})"
+        ))
+
+    fig.update_layout(title="Ймовірності станів у майбутньому",
+                      xaxis_title="Крок прогнозу",
+                      yaxis_title="Ймовірність",
+                      yaxis=dict(range=[0, 1]))
     return fig
 
 
